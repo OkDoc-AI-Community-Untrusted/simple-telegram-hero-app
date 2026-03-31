@@ -2,10 +2,23 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>OkdocTelegramPlugin</title>
+  <title>Telegram - OkDoc Plugin</title>
   <base href="/">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" type="image/x-icon" href="favicon.ico">
+
+  <!-- Node.js globals polyfill (must run before any module) -->
+  <script>
+    window.global = window;
+    window.process = window.process || { env: {}, version: '', browser: true };
+  </script>
+
+  <!-- Ionicons -->
+  <script type="module" src="https://unpkg.com/ionicons@7/dist/ionicons/ionicons.esm.js"></script>
+  <script nomodule src="https://unpkg.com/ionicons@7/dist/ionicons/ionicons.js"></script>
+
+  <!-- OkDoc Iframe Plugin SDK -->
+  <script src="https://cdn.jsdelivr.net/gh/okDoc-ai/plugin-sdk@1/cdn/okdoc-iframe-sdk.js"></script>
 </head>
 <body>
   <app-root></app-root>

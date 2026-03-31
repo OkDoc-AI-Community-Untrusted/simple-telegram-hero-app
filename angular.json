@@ -41,6 +41,7 @@
           "options": {
             "browser": "src/main.ts",
             "polyfills": [
+              "src/polyfills.ts",
               "zone.js"
             ],
             "tsConfig": "tsconfig.app.json",
@@ -53,6 +54,16 @@
             ],
             "styles": [
               "src/styles.scss"
+            ],
+            "allowedCommonJsDependencies": [
+              "telegram",
+              "big-integer",
+              "buffer",
+              "crypto-browserify",
+              "events",
+              "util",
+              "assert",
+              "stream"
             ]
           },
           "configurations": {
@@ -60,8 +71,8 @@
               "budgets": [
                 {
                   "type": "initial",
-                  "maximumWarning": "500kB",
-                  "maximumError": "1MB"
+                  "maximumWarning": "3MB",
+                  "maximumError": "5MB"
                 },
                 {
                   "type": "anyComponentStyle",
@@ -81,6 +92,12 @@
         },
         "serve": {
           "builder": "@angular/build:dev-server",
+          "options": {
+            "headers": {
+              "X-Frame-Options": "ALLOWALL",
+              "Content-Security-Policy": "frame-ancestors 'self' *.okdoc.ai localhost localhost:*"
+            }
+          },
           "configurations": {
             "production": {
               "buildTarget": "okdoc-telegram-plugin:build:production"
