@@ -38,7 +38,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: './dist/okdoc-telegram-plugin/browser'
+          path: './dist/simple-telegram-hero-app/browser'
 
   deploy:
     needs: build

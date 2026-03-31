@@ -3,7 +3,7 @@
   "version": 1,
   "newProjectRoot": "projects",
   "projects": {
-    "okdoc-telegram-plugin": {
+    "simple-telegram-hero-app": {
       "projectType": "application",
       "schematics": {
         "@schematics/angular:component": {
@@ -100,10 +100,10 @@
           },
           "configurations": {
             "production": {
-              "buildTarget": "okdoc-telegram-plugin:build:production"
+              "buildTarget": "simple-telegram-hero-app:build:production"
             },
             "development": {
-              "buildTarget": "okdoc-telegram-plugin:build:development"
+              "buildTarget": "simple-telegram-hero-app:build:development"
             }
           },
           "defaultConfiguration": "development"

@@ -16,9 +16,9 @@ export class OkDocService {
     if (typeof OkDoc === 'undefined') return;
 
     OkDoc.init({
-      id: 'okdoc-telegram-plugin',
-      name: 'Telegram Client',
-      namespace: 'telegram',
+      id: 'simple-telegram-hero-app',
+      name: 'Simple Telegram Hero App',
+      namespace: 'simple-telegram-hero-app',
       version: '1.0.0',
       description: 'Simple Telegram web client with contacts and messaging',
       icon: 'paper-plane-outline',
