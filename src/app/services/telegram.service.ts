@@ -21,6 +21,18 @@ export interface TgMessage {
   senderName: string;
 }
 
+export type DialogType = 'user' | 'group' | 'channel' | 'bot';
+
+export interface TgDialog {
+  id: string;
+  accessHash: string;
+  type: DialogType;
+  name: string;
+  lastMessage: string;
+  lastMessageDate: Date;
+  unreadCount: number;
+}
+
 const STORAGE_KEYS = {
   API_ID: 'tg_api_id',
   API_HASH: 'tg_api_hash',
@@ -40,6 +52,7 @@ export class TelegramService {
   readonly loading = signal(false);
 
   readonly contacts = signal<TgContact[]>([]);
+  readonly dialogs = signal<TgDialog[]>([]);
   readonly messages = signal<TgMessage[]>([]);
   readonly currentPeerId = signal('');
   readonly currentPeerName = signal('');
@@ -166,21 +179,39 @@ export class TelegramService {
   private setupEventHandlers(): void {
     if (!this.client) return;
 
-    this.client.addEventHandler((event: NewMessageEvent) => {
+    this.client.addEventHandler(async (event: NewMessageEvent) => {
       const message = event.message;
       if (message.out || !message.text) return;
 
-      const peerId = message.peerId;
-      let senderId = '';
-      if (peerId instanceof Api.PeerUser) {
-        senderId = peerId.userId.toString();
+      let senderName = 'Unknown';
+      try {
+        if (message.senderId) {
+          const sender = await this.client!.getEntity(message.senderId);
+          if (sender instanceof Api.User) {
+            senderName = [sender.firstName, sender.lastName].filter(Boolean).join(' ') || sender.username || 'Unknown';
+          } else if (sender instanceof Api.Chat) {
+            senderName = sender.title || 'Group';
+          } else if (sender instanceof Api.Channel) {
+            senderName = sender.title || 'Channel';
+          }
+        }
+      } catch {
+        const contact = this.contacts().find(c => c.id === message.senderId?.toString());
+        senderName = contact?.name || 'Unknown';
       }
 
-      const contact = this.contacts().find(c => c.id === senderId);
-      const senderName = contact?.name || 'Unknown';
+      const peerId = message.peerId;
+      let chatId = '';
+      if (peerId instanceof Api.PeerUser) {
+        chatId = peerId.userId.toString();
+      } else if (peerId instanceof Api.PeerChat) {
+        chatId = peerId.chatId.toString();
+      } else if (peerId instanceof Api.PeerChannel) {
+        chatId = peerId.channelId.toString();
+      }
 
       this.ngZone.run(() => {
-        if (senderId === this.currentPeerId()) {
+        if (chatId === this.currentPeerId()) {
           this.messages.update(msgs => [...msgs, {
             id: message.id,
             text: message.text || '',
@@ -239,27 +270,156 @@ export class TelegramService {
     return [];
   }
 
+  async loadDialogs(): Promise<TgDialog[]> {
+    if (!this.client) return [];
+
+    try {
+      const result = await this.client.invoke(
+        new Api.messages.GetDialogs({
+          offsetDate: 0,
+          offsetId: 0,
+          offsetPeer: new Api.InputPeerEmpty(),
+          limit: 100,
+          hash: bigInt(0),
+        })
+      );
+
+      if (!(result instanceof Api.messages.Dialogs) && !(result instanceof Api.messages.DialogsSlice)) {
+        return [];
+      }
+
+      const usersMap = new Map<string, Api.User>();
+      const chatsMap = new Map<string, Api.Chat | Api.Channel>();
+      for (const u of result.users) {
+        if (u instanceof Api.User) usersMap.set(u.id.toString(), u);
+      }
+      for (const c of result.chats) {
+        if (c instanceof Api.Chat) chatsMap.set(c.id.toString(), c);
+        else if (c instanceof Api.Channel) chatsMap.set(c.id.toString(), c);
+      }
+
+      const messagesMap = new Map<number, Api.Message>();
+      for (const m of result.messages) {
+        if (m instanceof Api.Message) messagesMap.set(m.id, m);
+      }
+
+      const dialogs: TgDialog[] = [];
+      for (const d of result.dialogs) {
+        if (!(d instanceof Api.Dialog)) continue;
+
+        const topMsg = messagesMap.get(d.topMessage);
+        let id = '';
+        let name = '';
+        let type: DialogType = 'user';
+        let accessHash = '0';
+
+        if (d.peer instanceof Api.PeerUser) {
+          id = d.peer.userId.toString();
+          const user = usersMap.get(id);
+          if (user) {
+            name = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || 'Unknown';
+            accessHash = (user.accessHash ?? bigInt(0)).toString();
+            type = user.bot ? 'bot' : 'user';
+          }
+        } else if (d.peer instanceof Api.PeerChat) {
+          id = d.peer.chatId.toString();
+          const chat = chatsMap.get(id);
+          if (chat && chat instanceof Api.Chat) {
+            name = chat.title || 'Group';
+            type = 'group';
+          }
+        } else if (d.peer instanceof Api.PeerChannel) {
+          id = d.peer.channelId.toString();
+          const channel = chatsMap.get(id);
+          if (channel && channel instanceof Api.Channel) {
+            name = channel.title || 'Channel';
+            accessHash = (channel.accessHash ?? bigInt(0)).toString();
+            type = channel.megagroup ? 'group' : 'channel';
+          }
+        }
+
+        if (!id || !name) continue;
+
+        dialogs.push({
+          id,
+          accessHash,
+          type,
+          name,
+          lastMessage: topMsg?.text || '',
+          lastMessageDate: topMsg ? new Date(topMsg.date * 1000) : new Date(0),
+          unreadCount: d.unreadCount ?? 0,
+        });
+      }
+
+      dialogs.sort((a, b) => b.lastMessageDate.getTime() - a.lastMessageDate.getTime());
+      this.ngZone.run(() => this.dialogs.set(dialogs));
+      return dialogs;
+    } catch (err) {
+      console.error('Failed to load dialogs:', err);
+      return [];
+    }
+  }
+
+  async searchDialogs(query: string): Promise<TgDialog[]> {
+    const q = query.trim();
+    if (!q) return this.dialogs();
+
+    const lower = q.toLowerCase();
+    return this.dialogs().filter(d => d.name.toLowerCase().includes(lower));
+  }
+
+  private buildInputPeer(peerId: string, dialog?: TgDialog | null, contact?: TgContact | null): Api.TypeInputPeer {
+    if (dialog) {
+      if (dialog.type === 'group' && !dialog.accessHash) {
+        return new Api.InputPeerChat({ chatId: bigInt(peerId) });
+      }
+      if (dialog.type === 'group' || dialog.type === 'channel') {
+        return new Api.InputPeerChannel({ channelId: bigInt(peerId), accessHash: bigInt(dialog.accessHash) });
+      }
+      return new Api.InputPeerUser({ userId: bigInt(peerId), accessHash: bigInt(dialog.accessHash) });
+    }
+    if (contact) {
+      return new Api.InputPeerUser({ userId: bigInt(peerId), accessHash: bigInt(contact.accessHash) });
+    }
+    return new Api.InputPeerUser({ userId: bigInt(peerId), accessHash: bigInt(0) });
+  }
+
+  private findPeer(peerId: string): { name: string; dialog?: TgDialog; contact?: TgContact } {
+    const dialog = this.dialogs().find(d => d.id === peerId);
+    const contact = this.contacts().find(c => c.id === peerId);
+    const name = dialog?.name || contact?.name || 'Unknown';
+    return { name, dialog, contact };
+  }
+
   async loadMessages(peerId: string, limit = 20): Promise<TgMessage[]> {
     if (!this.client) return [];
 
     this.currentPeerId.set(peerId);
-    const contact = this.contacts().find(c => c.id === peerId);
-    this.currentPeerName.set(contact?.name || 'Unknown');
+    const { name, dialog, contact } = this.findPeer(peerId);
+    this.currentPeerName.set(name);
 
     try {
-      const peer = new Api.InputPeerUser({
-        userId: bigInt(peerId),
-        accessHash: bigInt(contact?.accessHash || '0'),
-      });
-
+      const peer = this.buildInputPeer(peerId, dialog, contact);
       const raw = await this.client.getMessages(peer, { limit });
-      const messages: TgMessage[] = raw.map(m => ({
-        id: m.id,
-        text: m.text || '',
-        date: new Date(m.date * 1000),
-        out: m.out ?? false,
-        senderName: m.out ? 'You' : (contact?.name || 'Them'),
-      })).reverse();
+
+      const messages: TgMessage[] = raw.map(m => {
+        let senderName = 'Them';
+        if (m.out) {
+          senderName = 'You';
+        } else if (m.fromId instanceof Api.PeerUser) {
+          const fromId = m.fromId.userId.toString();
+          const c = this.contacts().find(ct => ct.id === fromId);
+          const d = this.dialogs().find(dl => dl.id === fromId);
+          senderName = c?.name || d?.name || 'Them';
+        }
+        return {
+          id: m.id,
+          text: m.text || '',
+          date: new Date(m.date * 1000),
+          out: m.out ?? false,
+          senderName,
+        };
+      }).reverse();
 
       this.ngZone.run(() => this.messages.set(messages));
       return messages;
@@ -272,14 +432,11 @@ export class TelegramService {
   async sendMessage(peerId: string, text: string): Promise<boolean> {
     if (!this.client || !text.trim()) return false;
 
-    const contact = this.contacts().find(c => c.id === peerId);
-    if (!contact) return false;
+    const { name, dialog, contact } = this.findPeer(peerId);
+    if (!dialog && !contact) return false;
 
     try {
-      const peer = new Api.InputPeerUser({
-        userId: bigInt(peerId),
-        accessHash: bigInt(contact.accessHash),
-      });
+      const peer = this.buildInputPeer(peerId, dialog, contact);
 
       await this.client.sendMessage(peer, { message: text });
 
@@ -293,7 +450,7 @@ export class TelegramService {
         }]);
       });
 
-      this.onMessageSent?.(contact.name, text);
+      this.onMessageSent?.(name, text);
       return true;
     } catch (err) {
       console.error('Failed to send message:', err);
@@ -344,6 +501,7 @@ export class TelegramService {
     this.authStep.set('credentials');
     this.authError.set('');
     this.contacts.set([]);
+    this.dialogs.set([]);
     this.messages.set([]);
     this.currentPeerId.set('');
     this.currentPeerName.set('');

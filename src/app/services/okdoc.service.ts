@@ -2,11 +2,15 @@ import { Injectable, inject, NgZone } from '@angular/core';
 import { Router } from '@angular/router';
 import { TelegramService } from './telegram.service';
 
+export type ActiveTab = 'chats' | 'contacts';
+
 @Injectable({ providedIn: 'root' })
 export class OkDocService {
   private tg = inject(TelegramService);
   private router = inject(Router);
   private ngZone = inject(NgZone);
+
+  onSwitchTab?: (tab: ActiveTab) => void;
 
   initialize(): void {
     if (typeof OkDoc === 'undefined') return;
@@ -28,18 +32,18 @@ export class OkDocService {
 
   private registerTools(): void {
     OkDoc.registerTool('switch_view', {
-      description: 'Switch between app views (login, contacts, chat)',
+      description: 'Switch between app views (login, contacts, chats, chat) or tabs',
       inputSchema: {
         type: 'object',
         properties: {
           view: {
             type: 'string',
             description: 'The view to switch to',
-            enum: ['login', 'contacts', 'chat'],
+            enum: ['login', 'contacts', 'chats', 'chat'],
           },
           peerId: {
             type: 'string',
-            description: 'Contact ID (required when view is "chat")',
+            description: 'Contact/chat ID (required when view is "chat")',
           },
         },
         required: ['view'],
@@ -49,7 +53,14 @@ export class OkDocService {
 
         if (view === 'contacts') {
           this.ngZone.run(() => this.router.navigate(['/contacts']));
-          return { content: [{ type: 'text', text: 'Switched to contacts view.' }] };
+          this.onSwitchTab?.('contacts');
+          return { content: [{ type: 'text', text: 'Switched to contacts tab.' }] };
+        }
+
+        if (view === 'chats') {
+          this.ngZone.run(() => this.router.navigate(['/contacts']));
+          this.onSwitchTab?.('chats');
+          return { content: [{ type: 'text', text: 'Switched to chats tab.' }] };
         }
 
         if (view === 'chat') {
@@ -127,6 +138,67 @@ export class OkDocService {
         return {
           content: [{ type: 'text', text: `Found ${matches.length} contact(s) matching "${query}":\n${text}` }],
           structuredContent: { contacts: matches },
+        };
+      },
+    });
+
+    OkDoc.registerTool('list_chats', {
+      description: 'List all Telegram chats (users, groups, channels, bots) sorted by last message',
+      annotations: { readOnlyHint: true },
+      handler: async () => {
+        if (!this.tg.isAuthenticated()) {
+          return { content: [{ type: 'text', text: 'Not authenticated. Please log in first.' }], isError: true };
+        }
+
+        const dialogs = this.tg.dialogs().length ? this.tg.dialogs() : await this.tg.loadDialogs();
+        if (dialogs.length === 0) {
+          return { content: [{ type: 'text', text: 'No chats found.' }] };
+        }
+
+        const text = dialogs
+          .map(d => `- ${d.name} (ID: ${d.id}, Type: ${d.type}${d.unreadCount ? ', Unread: ' + d.unreadCount : ''})`)
+          .join('\n');
+
+        return {
+          content: [{ type: 'text', text: `Chats (${dialogs.length}):\n${text}` }],
+          structuredContent: { dialogs },
+        };
+      },
+    });
+
+    OkDoc.registerTool('search_chats', {
+      description: 'Search chats by name',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'The search query to match against chat names' },
+        },
+        required: ['query'],
+      },
+      annotations: { readOnlyHint: true },
+      handler: async (args) => {
+        if (!this.tg.isAuthenticated()) {
+          return { content: [{ type: 'text', text: 'Not authenticated. Please log in first.' }], isError: true };
+        }
+
+        if (!this.tg.dialogs().length) {
+          await this.tg.loadDialogs();
+        }
+
+        const query = String(args['query']);
+        const matches = await this.tg.searchDialogs(query);
+
+        if (matches.length === 0) {
+          return { content: [{ type: 'text', text: `No chats found matching "${query}".` }] };
+        }
+
+        const text = matches
+          .map(d => `- ${d.name} (ID: ${d.id}, Type: ${d.type}${d.unreadCount ? ', Unread: ' + d.unreadCount : ''})`)
+          .join('\n');
+
+        return {
+          content: [{ type: 'text', text: `Found ${matches.length} chat(s) matching "${query}":\n${text}` }],
+          structuredContent: { dialogs: matches },
         };
       },
     });
