@@ -4,6 +4,7 @@ import { FormControl, FormGroup, Validators, ReactiveFormsModule } from '@angula
 import {
   IonContent, IonCard, IonCardHeader, IonCardTitle, IonCardSubtitle,
   IonCardContent, IonItem, IonInput, IonButton, IonSpinner, IonText, IonIcon,
+  IonCheckbox,
 } from '@ionic/angular/standalone';
 import { TelegramService } from '../../services/telegram.service';
 
@@ -14,6 +15,7 @@ import { TelegramService } from '../../services/telegram.service';
     ReactiveFormsModule,
     IonContent, IonCard, IonCardHeader, IonCardTitle, IonCardSubtitle,
     IonCardContent, IonItem, IonInput, IonButton, IonSpinner, IonText, IonIcon,
+    IonCheckbox,
   ],
   template: `
     <ion-content class="ion-padding">
@@ -26,7 +28,7 @@ import { TelegramService } from '../../services/telegram.service';
             </ion-card-title>
             <ion-card-subtitle>
               @switch (tg.authStep()) {
-                @case ('credentials') { Enter your Telegram API credentials }
+                @case ('credentials') { Enter your phone number to connect }
                 @case ('code') { Enter the verification code sent to your phone }
                 @case ('password') { Enter your two-factor authentication password }
                 @case ('loading') { Connecting... }
@@ -45,24 +47,6 @@ import { TelegramService } from '../../services/telegram.service';
                 <div [formGroup]="credentialsForm">
                   <ion-item>
                     <ion-input
-                      label="API ID"
-                      labelPlacement="stacked"
-                      type="number"
-                      formControlName="apiId"
-                      placeholder="Enter your API ID from my.telegram.org"
-                    ></ion-input>
-                  </ion-item>
-                  <ion-item>
-                    <ion-input
-                      label="API Hash"
-                      labelPlacement="stacked"
-                      type="text"
-                      formControlName="apiHash"
-                      placeholder="Enter your API Hash"
-                    ></ion-input>
-                  </ion-item>
-                  <ion-item>
-                    <ion-input
                       label="Phone Number"
                       labelPlacement="stacked"
                       type="tel"
@@ -70,11 +54,59 @@ import { TelegramService } from '../../services/telegram.service';
                       placeholder="+1234567890"
                     ></ion-input>
                   </ion-item>
+
+                  <!-- Advanced: Bring your own app -->
+                  <div class="advanced-toggle" (click)="showAdvanced.set(!showAdvanced())">
+                    <ion-icon [name]="showAdvanced() ? 'chevron-up-outline' : 'settings-outline'"></ion-icon>
+                    <span>{{ showAdvanced() ? 'Hide advanced options' : 'Advanced options' }}</span>
+                  </div>
+
+                  @if (showAdvanced()) {
+                    <div class="advanced-section">
+                      <ion-item lines="none">
+                        <ion-checkbox
+                          [checked]="useOwnApp()"
+                          (ionChange)="onUseOwnAppChange($event)"
+                          labelPlacement="end"
+                        >
+                          Bring your own Telegram App
+                        </ion-checkbox>
+                      </ion-item>
+
+                      @if (useOwnApp()) {
+                        <ion-text color="medium">
+                          <p class="hint">
+                            Go to <a href="https://my.telegram.org" target="_blank" rel="noopener">my.telegram.org</a>,
+                            create an app, and paste your credentials below.
+                          </p>
+                        </ion-text>
+                        <ion-item>
+                          <ion-input
+                            label="API ID"
+                            labelPlacement="stacked"
+                            type="number"
+                            formControlName="apiId"
+                            placeholder="Your API ID"
+                          ></ion-input>
+                        </ion-item>
+                        <ion-item>
+                          <ion-input
+                            label="API Hash"
+                            labelPlacement="stacked"
+                            type="text"
+                            formControlName="apiHash"
+                            placeholder="Your API Hash"
+                          ></ion-input>
+                        </ion-item>
+                      }
+                    </div>
+                  }
+
                   <ion-button
                     expand="block"
                     type="button"
                     (click)="onConnect()"
-                    [disabled]="credentialsForm.invalid || tg.loading()"
+                    [disabled]="!canConnect() || tg.loading()"
                     class="ion-margin-top"
                   >
                     @if (tg.loading()) {
@@ -83,13 +115,6 @@ import { TelegramService } from '../../services/telegram.service';
                     Connect
                   </ion-button>
                 </div>
-
-                <ion-text color="medium">
-                  <p class="hint">
-                    Get your API credentials from
-                    <a href="https://my.telegram.org" target="_blank" rel="noopener">my.telegram.org</a>
-                  </p>
-                </ion-text>
               }
 
               @if (tg.authStep() === 'code') {
@@ -186,16 +211,37 @@ import { TelegramService } from '../../services/telegram.service';
       align-items: center;
       padding: 24px;
     }
+    .advanced-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 16px;
+      padding: 8px 4px;
+      cursor: pointer;
+      color: var(--ion-color-medium);
+      font-size: 0.9em;
+      user-select: none;
+    }
+    .advanced-toggle:hover {
+      color: var(--ion-color-primary);
+    }
+    .advanced-section {
+      margin-top: 8px;
+      padding: 8px 0;
+      border-top: 1px solid var(--ion-color-light);
+    }
   `],
 })
 export class LoginPage implements OnInit {
   protected readonly tg = inject(TelegramService);
   private readonly router = inject(Router);
   protected readonly restoring = signal(false);
+  protected readonly showAdvanced = signal(false);
+  protected readonly useOwnApp = signal(false);
 
   protected readonly credentialsForm = new FormGroup({
-    apiId: new FormControl('', Validators.required),
-    apiHash: new FormControl('', Validators.required),
+    apiId: new FormControl(''),
+    apiHash: new FormControl(''),
     phone: new FormControl('', Validators.required),
   });
 
@@ -222,16 +268,51 @@ export class LoginPage implements OnInit {
       return;
     }
 
-    const apiId = localStorage.getItem('tg_api_id');
-    const apiHash = localStorage.getItem('tg_api_hash');
-    if (apiId) this.credentialsForm.patchValue({ apiId });
-    if (apiHash) this.credentialsForm.patchValue({ apiHash });
+    const savedApiId = localStorage.getItem('tg_api_id');
+    const savedApiHash = localStorage.getItem('tg_api_hash');
+    if (savedApiId && savedApiHash) {
+      this.useOwnApp.set(true);
+      this.showAdvanced.set(true);
+      this.credentialsForm.patchValue({ apiId: savedApiId, apiHash: savedApiHash });
+    } else if (!this.tg.hasDefaultCredentials) {
+      // No built-in credentials (placeholders or empty) — require user to provide their own
+      this.useOwnApp.set(true);
+      this.showAdvanced.set(true);
+    }
+  }
+
+  protected canConnect(): boolean {
+    const phone = this.credentialsForm.value.phone;
+    if (!phone) return false;
+    if (this.useOwnApp()) {
+      const { apiId, apiHash } = this.credentialsForm.value;
+      return !!apiId && !!apiHash;
+    }
+    return this.tg.hasDefaultCredentials;
+  }
+
+  protected onUseOwnAppChange(event: CustomEvent): void {
+    this.useOwnApp.set(event.detail.checked);
   }
 
   protected onConnect(): void {
-    if (this.credentialsForm.invalid) return;
-    const { apiId, apiHash, phone } = this.credentialsForm.value;
-    this.tg.startAuth(parseInt(apiId!, 10), apiHash!, phone!);
+    const phone = this.credentialsForm.value.phone;
+    if (!phone) return;
+
+    let apiId: number;
+    let apiHash: string;
+
+    if (this.useOwnApp()) {
+      const { apiId: customId, apiHash: customHash } = this.credentialsForm.value;
+      if (!customId || !customHash) return;
+      apiId = parseInt(customId, 10);
+      apiHash = customHash;
+    } else {
+      apiId = parseInt(this.tg.defaultApiId, 10);
+      apiHash = this.tg.defaultApiHash;
+    }
+
+    this.tg.startAuth(apiId, apiHash, phone, this.useOwnApp());
   }
 
   protected onSubmitCode(): void {

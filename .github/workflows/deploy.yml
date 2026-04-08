@@ -32,6 +32,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Inject Telegram credentials
+        run: |
+          sed -i "s/TELEGRAM_API_ID_PLACEHOLDER/${{ secrets.TELEGRAM_API_ID }}/g" src/environments/environment.prod.ts
+          sed -i "s/TELEGRAM_API_HASH_PLACEHOLDER/${{ secrets.TELEGRAM_API_HASH }}/g" src/environments/environment.prod.ts
+
       - name: Build
         run: npx ng build --configuration production --base-href /simple-telegram-hero-app/
 

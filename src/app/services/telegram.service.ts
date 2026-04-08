@@ -4,6 +4,7 @@ import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions';
 import { NewMessage, NewMessageEvent } from 'telegram/events';
 import bigInt from 'big-integer';
+import { environment } from '../../environments/environment';
 
 export interface TgContact {
   id: string;
@@ -63,9 +64,25 @@ export class TelegramService {
   onNewMessage?: (senderName: string, text: string) => void;
   onMessageSent?: (recipientName: string, text: string) => void;
 
+  get defaultApiId(): string {
+    return environment.telegram.apiId;
+  }
+
+  get defaultApiHash(): string {
+    return environment.telegram.apiHash;
+  }
+
+  get hasDefaultCredentials(): boolean {
+    return this.isValidCredential(this.defaultApiId) && this.isValidCredential(this.defaultApiHash);
+  }
+
+  private isValidCredential(value: string): boolean {
+    return !!value && value !== 'TELEGRAM_API_ID_PLACEHOLDER' && value !== 'TELEGRAM_API_HASH_PLACEHOLDER';
+  }
+
   async tryRestoreSession(): Promise<boolean> {
-    const apiId = localStorage.getItem(STORAGE_KEYS.API_ID);
-    const apiHash = localStorage.getItem(STORAGE_KEYS.API_HASH);
+    const apiId = localStorage.getItem(STORAGE_KEYS.API_ID) || this.defaultApiId;
+    const apiHash = localStorage.getItem(STORAGE_KEYS.API_HASH) || this.defaultApiHash;
     const sessionStr = localStorage.getItem(STORAGE_KEYS.SESSION);
 
     if (!apiId || !apiHash || !sessionStr) return false;
@@ -95,13 +112,18 @@ export class TelegramService {
     return false;
   }
 
-  async startAuth(apiId: number, apiHash: string, phoneNumber: string): Promise<void> {
+  async startAuth(apiId: number, apiHash: string, phoneNumber: string, useCustomCredentials = false): Promise<void> {
     this.loading.set(true);
     this.authError.set('');
 
     try {
-      localStorage.setItem(STORAGE_KEYS.API_ID, apiId.toString());
-      localStorage.setItem(STORAGE_KEYS.API_HASH, apiHash);
+      if (useCustomCredentials) {
+        localStorage.setItem(STORAGE_KEYS.API_ID, apiId.toString());
+        localStorage.setItem(STORAGE_KEYS.API_HASH, apiHash);
+      } else {
+        localStorage.removeItem(STORAGE_KEYS.API_ID);
+        localStorage.removeItem(STORAGE_KEYS.API_HASH);
+      }
 
       if (!this.client) {
         const isAuthed = await this.initClient(apiId, apiHash);
