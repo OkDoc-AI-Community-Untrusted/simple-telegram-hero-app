@@ -159,9 +159,17 @@ export class TelegramService {
             this.authError.set(err.message);
             this.loading.set(false);
           });
-          return true;
+          // Return false so the error propagates — returning true would silently
+          // swallow the error and let start() resolve, running the success path
+          // even though auth didn't complete.
+          return false;
         },
       });
+
+      // Verify auth actually succeeded before proceeding
+      if (!await this.client!.isUserAuthorized()) {
+        throw new Error('Authentication was not completed. Please try again.');
+      }
 
       this.ngZone.run(() => {
         this.isAuthenticated.set(true);
@@ -172,8 +180,16 @@ export class TelegramService {
       this.router.navigate(['/contacts']);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Authentication failed';
+
+      // Clean up the failed client so the next Connect attempt starts fresh
+      try { this.client?.disconnect(); } catch { /* ignore */ }
+      this.client = null;
+      this.codeResolver = undefined;
+      this.passwordResolver = undefined;
+
       this.ngZone.run(() => {
         this.authError.set(message);
+        this.authStep.set('credentials');
         this.loading.set(false);
       });
     }
