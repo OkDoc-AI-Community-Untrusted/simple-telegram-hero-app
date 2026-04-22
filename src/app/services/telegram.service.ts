@@ -61,7 +61,13 @@ export class TelegramService {
   private codeResolver?: (code: string) => void;
   private passwordResolver?: (pwd: string) => void;
 
-  onNewMessage?: (senderName: string, text: string) => void;
+  onNewMessage?: (info: {
+    senderName: string;
+    chatId: string;
+    chatName: string;
+    chatType: DialogType;
+    text: string;
+  }) => void;
   onMessageSent?: (recipientName: string, text: string) => void;
 
   get defaultApiId(): string {
@@ -240,12 +246,38 @@ export class TelegramService {
 
       const peerId = message.peerId;
       let chatId = '';
+      let chatType: DialogType = 'user';
       if (peerId instanceof Api.PeerUser) {
         chatId = peerId.userId.toString();
+        chatType = 'user';
       } else if (peerId instanceof Api.PeerChat) {
         chatId = peerId.chatId.toString();
+        chatType = 'group';
       } else if (peerId instanceof Api.PeerChannel) {
         chatId = peerId.channelId.toString();
+        chatType = 'channel';
+      }
+
+      // Resolve chat display name. For private (user) chats, chat name equals sender name.
+      let chatName = senderName;
+      if (chatType !== 'user') {
+        const dialog = this.dialogs().find(d => d.id === chatId);
+        if (dialog) {
+          chatName = dialog.name;
+          chatType = dialog.type;
+        } else {
+          try {
+            const chatEntity = await this.client!.getEntity(peerId);
+            if (chatEntity instanceof Api.Chat) {
+              chatName = chatEntity.title || 'Group';
+            } else if (chatEntity instanceof Api.Channel) {
+              chatName = chatEntity.title || 'Channel';
+              chatType = chatEntity.megagroup ? 'group' : 'channel';
+            }
+          } catch {
+            chatName = chatType === 'channel' ? 'Channel' : 'Group';
+          }
+        }
       }
 
       this.ngZone.run(() => {
@@ -260,7 +292,13 @@ export class TelegramService {
         }
       });
 
-      this.onNewMessage?.(senderName, message.text || '');
+      this.onNewMessage?.({
+        senderName,
+        chatId,
+        chatName,
+        chatType,
+        text: message.text || '',
+      });
     }, new NewMessage({}));
   }
 
