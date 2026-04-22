@@ -106,7 +106,10 @@ export class OkDocService {
     });
 
     OkDoc.registerTool('search_contacts', {
-      description: 'Search contacts by name, username, or phone number and return matching IDs',
+      description:
+        'Search the user\'s OWN saved Telegram contacts locally by name, username, or phone. ' +
+        'Mirrors the in-app contacts search. Does NOT query Telegram\'s global directory. ' +
+        'If no match is found, consider asking the user whether to try `global_search`.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -167,7 +170,11 @@ export class OkDocService {
     });
 
     OkDoc.registerTool('search_chats', {
-      description: 'Search chats by name',
+      description:
+        'Search the user\'s EXISTING chats (dialogs) locally by name. ' +
+        'Mirrors the in-app chats search — only returns conversations the user is already part of. ' +
+        'Does NOT discover new public channels/groups. ' +
+        'If no match is found, consider asking the user whether to try `global_search`.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -199,6 +206,48 @@ export class OkDocService {
         return {
           content: [{ type: 'text', text: `Found ${matches.length} chat(s) matching "${query}":\n${text}` }],
           structuredContent: { dialogs: matches },
+        };
+      },
+    });
+
+    OkDoc.registerTool('global_search', {
+      description:
+        'Global Telegram search across the entire Telegram network — finds users, public groups, ' +
+        'channels, and bots the user does NOT already have in their contacts or chats. ' +
+        'IMPORTANT: Prefer `search_contacts` and `search_chats` first. Only call `global_search` ' +
+        'AFTER explicitly asking the user for confirmation when the local searches return no results.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'The search query (name, username, title)' },
+          limit: { type: 'number', description: 'Max results (default 50, max 100)', minimum: 1, maximum: 100 },
+        },
+        required: ['query'],
+      },
+      annotations: { readOnlyHint: true },
+      handler: async (args) => {
+        if (!this.tg.isAuthenticated()) {
+          return { content: [{ type: 'text', text: 'Not authenticated. Please log in first.' }], isError: true };
+        }
+
+        const query = String(args['query']);
+        const limit = Math.min(Number(args['limit']) || 50, 100);
+        const { users, chats } = await this.tg.globalSearch(query, limit);
+
+        if (users.length === 0 && chats.length === 0) {
+          return { content: [{ type: 'text', text: `Global search found nothing for "${query}".` }] };
+        }
+
+        const userLines = users.map(u => `- [user] ${u.name} (ID: ${u.id}${u.username ? ', @' + u.username : ''})`);
+        const chatLines = chats.map(c => `- [${c.type}] ${c.name} (ID: ${c.id})`);
+        const text = [...userLines, ...chatLines].join('\n');
+
+        return {
+          content: [{
+            type: 'text',
+            text: `Global search results for "${query}" (${users.length} user(s), ${chats.length} chat(s)):\n${text}`,
+          }],
+          structuredContent: { users, chats },
         };
       },
     });
@@ -291,10 +340,15 @@ export class OkDocService {
   }
 
   private setupNotifiers(): void {
-    this.tg.onNewMessage = (senderName: string, text: string) => {
-      if (typeof OkDoc !== 'undefined') {
-        OkDoc.notify(`New message from ${senderName}: ${text}`);
-      }
+    this.tg.onNewMessage = ({ senderName, chatId, chatName, chatType, text }) => {
+      if (typeof OkDoc === 'undefined') return;
+
+      const isPersonal = chatType === 'user';
+      const header = isPersonal
+        ? `New message from ${senderName}`
+        : `New message in ${chatType === 'channel' ? 'channel' : 'group'} "${chatName}" [id:${chatId}] from ${senderName}`;
+
+      OkDoc.notify(`${header}: ${text}`);
     };
 
     this.tg.onMessageSent = (recipientName: string, text: string) => {

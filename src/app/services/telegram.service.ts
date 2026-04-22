@@ -498,15 +498,35 @@ export class TelegramService {
 
   async searchContacts(query: string): Promise<TgContact[]> {
     const q = query.trim();
-    if (!q || !this.client) return this.contacts();
+    if (!q) return this.contacts();
+
+    const lower = q.toLowerCase();
+    return this.contacts().filter(c =>
+      c.name.toLowerCase().includes(lower) ||
+      c.username.toLowerCase().includes(lower) ||
+      c.phone.includes(q)
+    );
+  }
+
+  /**
+   * Global Telegram search across users, groups, channels, and bots (server-side).
+   * Use sparingly — this calls Telegram's servers. Prefer `searchContacts` /
+   * `searchDialogs` for local filtering of the current user's own data.
+   */
+  async globalSearch(query: string, limit = 50): Promise<{
+    users: TgContact[];
+    chats: TgDialog[];
+  }> {
+    const q = query.trim();
+    if (!q || !this.client) return { users: [], chats: [] };
 
     try {
       const result = await this.client.invoke(
-        new Api.contacts.Search({ q, limit: 50 })
+        new Api.contacts.Search({ q, limit })
       );
 
-      return result.users
-        .filter((u): u is Api.User => u instanceof Api.User && !u.bot && !u.deleted)
+      const users: TgContact[] = result.users
+        .filter((u): u is Api.User => u instanceof Api.User && !u.deleted)
         .map(u => ({
           id: u.id.toString(),
           accessHash: (u.accessHash ?? bigInt(0)).toString(),
@@ -514,15 +534,39 @@ export class TelegramService {
           phone: u.phone || '',
           username: u.username || '',
         }));
+
+      const chats: TgDialog[] = result.chats
+        .map(c => {
+          if (c instanceof Api.Chat) {
+            return {
+              id: c.id.toString(),
+              accessHash: '0',
+              type: 'group' as DialogType,
+              name: c.title || 'Group',
+              lastMessage: '',
+              lastMessageDate: new Date(0),
+              unreadCount: 0,
+            };
+          }
+          if (c instanceof Api.Channel) {
+            return {
+              id: c.id.toString(),
+              accessHash: (c.accessHash ?? bigInt(0)).toString(),
+              type: (c.megagroup ? 'group' : 'channel') as DialogType,
+              name: c.title || 'Channel',
+              lastMessage: '',
+              lastMessageDate: new Date(0),
+              unreadCount: 0,
+            };
+          }
+          return null;
+        })
+        .filter((d): d is TgDialog => d !== null);
+
+      return { users, chats };
     } catch (err) {
-      console.error('Failed to search contacts:', err);
-      // Fall back to local filter
-      const lower = q.toLowerCase();
-      return this.contacts().filter(c =>
-        c.name.toLowerCase().includes(lower) ||
-        c.username.toLowerCase().includes(lower) ||
-        c.phone.includes(q)
-      );
+      console.error('Global search failed:', err);
+      return { users: [], chats: [] };
     }
   }
 
