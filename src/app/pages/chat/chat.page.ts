@@ -24,6 +24,15 @@ import { TelegramService } from '../../services/telegram.service';
           <ion-back-button defaultHref="/contacts"></ion-back-button>
         </ion-buttons>
         <ion-title>{{ tg.currentPeerName() }}</ion-title>
+        <ion-buttons slot="end">
+          <ion-button (click)="refresh()" [disabled]="loadingMessages()" aria-label="Refresh messages">
+            @if (loadingMessages()) {
+              <ion-spinner name="crescent" slot="icon-only"></ion-spinner>
+            } @else {
+              <ion-icon slot="icon-only" name="refresh-outline"></ion-icon>
+            }
+          </ion-button>
+        </ion-buttons>
       </ion-toolbar>
     </ion-header>
 
@@ -182,6 +191,13 @@ export class ChatPage implements OnInit, OnDestroy {
     await this.tg.sendMessage(this.peerId, text);
     this.messageInput.reset();
     this.sending.set(false);
+  }
+
+  protected async refresh(): Promise<void> {
+    if (!this.peerId || this.loadingMessages()) return;
+    this.loadingMessages.set(true);
+    await this.tg.loadMessages(this.peerId);
+    this.loadingMessages.set(false);
   }
 
   protected formatTime(date: Date): string {
