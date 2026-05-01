@@ -1,8 +1,8 @@
-import { Injectable, inject, NgZone } from '@angular/core';
+import { Injectable, inject, NgZone, signal } from '@angular/core';
 import { Router } from '@angular/router';
-import { TelegramService } from './telegram.service';
+import { DialogFilter, TelegramService } from './telegram.service';
 
-export type ActiveTab = 'chats' | 'contacts';
+export type ActiveTab = 'all_chats' | 'personal_chats' | 'group_chats' | 'channel_chats' | 'bot_chats' | 'contacts';
 
 @Injectable({ providedIn: 'root' })
 export class OkDocService {
@@ -10,7 +10,29 @@ export class OkDocService {
   private router = inject(Router);
   private ngZone = inject(NgZone);
 
-  onSwitchTab?: (tab: ActiveTab) => void;
+  readonly activeTab = signal<ActiveTab>('all_chats');
+
+  private readonly tabLabels: Record<ActiveTab, string> = {
+    all_chats: 'All Chats',
+    personal_chats: 'Personal Chats',
+    group_chats: 'Group Chats',
+    channel_chats: 'Channels',
+    bot_chats: 'Bot Chats',
+    contacts: 'Contacts',
+  };
+
+  notifyTabChanged(tab: ActiveTab): void {
+    if (typeof OkDoc !== 'undefined') {
+      OkDoc.notify(`Telegram tab changed to ${this.tabLabels[tab]}.`);
+    }
+  }
+
+  setActiveTab(tab: ActiveTab, notify = true): void {
+    this.activeTab.set(tab);
+    if (notify) {
+      this.notifyTabChanged(tab);
+    }
+  }
 
   initialize(): void {
     if (typeof OkDoc === 'undefined') return;
@@ -32,14 +54,22 @@ export class OkDocService {
 
   private registerTools(): void {
     OkDoc.registerTool('switch_view', {
-      description: 'Switch between app views (login, contacts, chats, chat) or tabs',
+      description: 'Switch between app views (login, chat) or Telegram tabs by name',
       inputSchema: {
         type: 'object',
         properties: {
           view: {
             type: 'string',
             description: 'The view to switch to',
-            enum: ['login', 'contacts', 'chats', 'chat'],
+            enum: [
+              'login', 'chat',
+              'contacts',
+              'chats', 'all_chats', 'all',
+              'personal_chats', 'personal', 'private_chats', 'private',
+              'group_chats', 'groups', 'group',
+              'channel_chats', 'channels', 'channel',
+              'bot_chats', 'bots', 'bot',
+            ],
           },
           peerId: {
             type: 'string',
@@ -51,16 +81,10 @@ export class OkDocService {
       handler: async (args) => {
         const view = String(args['view']);
 
-        if (view === 'contacts') {
-          this.ngZone.run(() => this.router.navigate(['/contacts']));
-          this.onSwitchTab?.('contacts');
-          return { content: [{ type: 'text', text: 'Switched to contacts tab.' }] };
-        }
-
-        if (view === 'chats') {
-          this.ngZone.run(() => this.router.navigate(['/contacts']));
-          this.onSwitchTab?.('chats');
-          return { content: [{ type: 'text', text: 'Switched to chats tab.' }] };
+        const tab = this.viewToTab(view);
+        if (tab) {
+          this.switchToTab(tab);
+          return { content: [{ type: 'text', text: `Switched to ${this.tabLabels[tab]} tab.` }] };
         }
 
         if (view === 'chat') {
@@ -78,6 +102,36 @@ export class OkDocService {
         }
 
         return { content: [{ type: 'text', text: `Unknown view: ${view}` }], isError: true };
+      },
+    });
+
+    OkDoc.registerTool('switch_tab', {
+      description: 'Open one of the Telegram tabs by name',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          tab: {
+            type: 'string',
+            description: 'Tab to open',
+            enum: [
+              'contacts',
+              'chats', 'all_chats', 'all',
+              'personal_chats', 'personal', 'private_chats', 'private',
+              'group_chats', 'groups', 'group',
+              'channel_chats', 'channels', 'channel',
+              'bot_chats', 'bots', 'bot',
+            ],
+          },
+        },
+        required: ['tab'],
+      },
+      handler: async (args) => {
+        const tab = this.viewToTab(String(args['tab']));
+        if (!tab) {
+          return { content: [{ type: 'text', text: `Unknown tab: ${String(args['tab'])}` }], isError: true };
+        }
+        this.switchToTab(tab);
+        return { content: [{ type: 'text', text: `Opened ${this.tabLabels[tab]} tab.` }] };
       },
     });
 
@@ -146,20 +200,37 @@ export class OkDocService {
     });
 
     OkDoc.registerTool('list_chats', {
-      description: 'List all Telegram chats (users, groups, channels, bots) sorted by last message',
+      description: 'List Telegram chats by category, sorted by last message. Archived chats are hidden unless explicitly included or enabled.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          type: {
+            type: 'string',
+            description: 'Chat category to list',
+            enum: ['all', 'personal', 'group', 'channel', 'bot'],
+          },
+          includeArchived: {
+            type: 'boolean',
+            description: 'Include archived chats even when the app toggle is off',
+          },
+        },
+      },
       annotations: { readOnlyHint: true },
-      handler: async () => {
+      handler: async (args) => {
         if (!this.tg.isAuthenticated()) {
           return { content: [{ type: 'text', text: 'Not authenticated. Please log in first.' }], isError: true };
         }
 
-        const dialogs = this.tg.dialogs().length ? this.tg.dialogs() : await this.tg.loadDialogs();
+        const includeArchived = this.resolveIncludeArchived(args['includeArchived']);
+        const filter = this.resolveDialogFilter(args['type']);
+        const source = this.tg.dialogs().length ? this.tg.dialogs() : await this.tg.loadDialogs(includeArchived);
+        const dialogs = this.tg.filterDialogs(source, filter, includeArchived);
         if (dialogs.length === 0) {
           return { content: [{ type: 'text', text: 'No chats found.' }] };
         }
 
         const text = dialogs
-          .map(d => `- ${d.name} (ID: ${d.id}, Type: ${d.type}${d.unreadCount ? ', Unread: ' + d.unreadCount : ''})`)
+          .map(d => `- ${d.name} (ID: ${d.id}, Type: ${this.formatDialogType(d.type)}${d.archived ? ', Archived' : ''}${d.unreadCount ? ', Unread: ' + d.unreadCount : ''})`)
           .join('\n');
 
         return {
@@ -179,6 +250,15 @@ export class OkDocService {
         type: 'object',
         properties: {
           query: { type: 'string', description: 'The search query to match against chat names' },
+          type: {
+            type: 'string',
+            description: 'Chat category to search',
+            enum: ['all', 'personal', 'group', 'channel', 'bot'],
+          },
+          includeArchived: {
+            type: 'boolean',
+            description: 'Include archived chats even when the app toggle is off',
+          },
         },
         required: ['query'],
       },
@@ -188,25 +268,46 @@ export class OkDocService {
           return { content: [{ type: 'text', text: 'Not authenticated. Please log in first.' }], isError: true };
         }
 
-        if (!this.tg.dialogs().length) {
-          await this.tg.loadDialogs();
+        const query = String(args['query']);
+        const includeArchived = this.resolveIncludeArchived(args['includeArchived']);
+        if (!this.tg.dialogs().length || includeArchived) {
+          await this.tg.loadDialogs(includeArchived);
         }
 
-        const query = String(args['query']);
-        const matches = await this.tg.searchDialogs(query);
+        const filter = this.resolveDialogFilter(args['type']);
+        const matches = await this.tg.searchDialogs(query, filter, includeArchived);
 
         if (matches.length === 0) {
           return { content: [{ type: 'text', text: `No chats found matching "${query}".` }] };
         }
 
         const text = matches
-          .map(d => `- ${d.name} (ID: ${d.id}, Type: ${d.type}${d.unreadCount ? ', Unread: ' + d.unreadCount : ''})`)
+          .map(d => `- ${d.name} (ID: ${d.id}, Type: ${this.formatDialogType(d.type)}${d.archived ? ', Archived' : ''}${d.unreadCount ? ', Unread: ' + d.unreadCount : ''})`)
           .join('\n');
 
         return {
           content: [{ type: 'text', text: `Found ${matches.length} chat(s) matching "${query}":\n${text}` }],
           structuredContent: { dialogs: matches },
         };
+      },
+    });
+
+    OkDoc.registerTool('set_archived_chats_visibility', {
+      description: 'Show or hide archived Telegram chats in tabs, chat search, and chat listing tools',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          showArchived: {
+            type: 'boolean',
+            description: 'true to show archived chats, false to hide them',
+          },
+        },
+        required: ['showArchived'],
+      },
+      handler: async (args) => {
+        const showArchived = Boolean(args['showArchived']);
+        await this.tg.setShowArchivedChats(showArchived);
+        return { content: [{ type: 'text', text: `Archived chats are now ${showArchived ? 'shown' : 'hidden'}.` }] };
       },
     });
 
@@ -343,7 +444,7 @@ export class OkDocService {
     this.tg.onNewMessage = ({ senderName, chatId, chatName, chatType, text }) => {
       if (typeof OkDoc === 'undefined') return;
 
-      const isPersonal = chatType === 'user';
+      const isPersonal = chatType === 'personal';
       const header = isPersonal
         ? `New message from ${senderName}`
         : `New message in ${chatType === 'channel' ? 'channel' : 'group'} "${chatName}" [id:${chatId}] from ${senderName}`;
@@ -356,5 +457,66 @@ export class OkDocService {
         OkDoc.notify(`Message sent to ${recipientName}: ${text}`);
       }
     };
+
+    this.tg.onArchiveVisibilityChanged = (showArchived) => {
+      if (typeof OkDoc !== 'undefined') {
+        OkDoc.notify(`Archived chats are now ${showArchived ? 'shown' : 'hidden'}.`);
+      }
+    };
+  }
+
+  private switchToTab(tab: ActiveTab): void {
+    this.setActiveTab(tab);
+    this.ngZone.run(() => this.router.navigate(['/contacts']));
+  }
+
+  private viewToTab(view: string): ActiveTab | null {
+    const normalized = view.trim().toLowerCase().replace(/[\s-]+/g, '_');
+    switch (normalized) {
+      case 'contacts':
+      case 'contact':
+        return 'contacts';
+      case 'chats':
+      case 'all':
+      case 'all_chats':
+        return 'all_chats';
+      case 'personal':
+      case 'personal_chat':
+      case 'personal_chats':
+      case 'private':
+      case 'private_chat':
+      case 'private_chats':
+        return 'personal_chats';
+      case 'group':
+      case 'groups':
+      case 'group_chat':
+      case 'group_chats':
+        return 'group_chats';
+      case 'channel':
+      case 'channels':
+      case 'channel_chat':
+      case 'channel_chats':
+        return 'channel_chats';
+      case 'bot':
+      case 'bots':
+      case 'bot_chat':
+      case 'bot_chats':
+        return 'bot_chats';
+      default:
+        return null;
+    }
+  }
+
+  private resolveDialogFilter(value: unknown): DialogFilter {
+    if (value === 'personal' || value === 'group' || value === 'channel' || value === 'bot') return value;
+    return 'all';
+  }
+
+  private resolveIncludeArchived(value: unknown): boolean {
+    return typeof value === 'boolean' ? value : this.tg.showArchivedChats();
+  }
+
+  private formatDialogType(type: string): string {
+    return type === 'personal' ? 'personal' : type;
   }
 }

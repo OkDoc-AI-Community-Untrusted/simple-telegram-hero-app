@@ -22,7 +22,8 @@ export interface TgMessage {
   senderName: string;
 }
 
-export type DialogType = 'user' | 'group' | 'channel' | 'bot';
+export type DialogType = 'personal' | 'group' | 'channel' | 'bot';
+export type DialogFilter = 'all' | DialogType;
 
 export interface TgDialog {
   id: string;
@@ -32,6 +33,10 @@ export interface TgDialog {
   lastMessage: string;
   lastMessageDate: Date;
   unreadCount: number;
+  archived: boolean;
+  apiType: 'PeerUser' | 'PeerChat' | 'PeerChannel';
+  isForum: boolean;
+  isGigagroup: boolean;
 }
 
 const STORAGE_KEYS = {
@@ -39,6 +44,7 @@ const STORAGE_KEYS = {
   API_HASH: 'tg_api_hash',
   SESSION: 'tg_session',
   CONTACTS: 'tg_contacts',
+  SHOW_ARCHIVED_CHATS: 'tg_show_archived_chats',
 } as const;
 
 @Injectable({ providedIn: 'root' })
@@ -54,6 +60,7 @@ export class TelegramService {
 
   readonly contacts = signal<TgContact[]>([]);
   readonly dialogs = signal<TgDialog[]>([]);
+  readonly showArchivedChats = signal(localStorage.getItem(STORAGE_KEYS.SHOW_ARCHIVED_CHATS) === 'true');
   readonly messages = signal<TgMessage[]>([]);
   readonly currentPeerId = signal('');
   readonly currentPeerName = signal('');
@@ -69,6 +76,7 @@ export class TelegramService {
     text: string;
   }) => void;
   onMessageSent?: (recipientName: string, text: string) => void;
+  onArchiveVisibilityChanged?: (showArchived: boolean) => void;
 
   get defaultApiId(): string {
     return environment.telegram.apiId;
@@ -246,10 +254,10 @@ export class TelegramService {
 
       const peerId = message.peerId;
       let chatId = '';
-      let chatType: DialogType = 'user';
+      let chatType: DialogType = 'personal';
       if (peerId instanceof Api.PeerUser) {
         chatId = peerId.userId.toString();
-        chatType = 'user';
+        chatType = 'personal';
       } else if (peerId instanceof Api.PeerChat) {
         chatId = peerId.chatId.toString();
         chatType = 'group';
@@ -260,7 +268,7 @@ export class TelegramService {
 
       // Resolve chat display name. For private (user) chats, chat name equals sender name.
       let chatName = senderName;
-      if (chatType !== 'user') {
+      if (chatType !== 'personal') {
         const dialog = this.dialogs().find(d => d.id === chatId);
         if (dialog) {
           chatName = dialog.name;
@@ -346,86 +354,109 @@ export class TelegramService {
     return [];
   }
 
-  async loadDialogs(): Promise<TgDialog[]> {
+  async loadDialogs(includeArchived = this.showArchivedChats()): Promise<TgDialog[]> {
     if (!this.client) return [];
 
     try {
-      const result = await this.client.invoke(
+      const loadFolder = (folderId?: number) => this.client!.invoke(
         new Api.messages.GetDialogs({
           offsetDate: 0,
           offsetId: 0,
           offsetPeer: new Api.InputPeerEmpty(),
           limit: 100,
           hash: bigInt(0),
+          ...(folderId ? { folderId } : {}),
         })
       );
 
-      if (!(result instanceof Api.messages.Dialogs) && !(result instanceof Api.messages.DialogsSlice)) {
-        return [];
+      const results = [await loadFolder()];
+      if (includeArchived) {
+        results.push(await loadFolder(1));
       }
 
-      const usersMap = new Map<string, Api.User>();
-      const chatsMap = new Map<string, Api.Chat | Api.Channel>();
-      for (const u of result.users) {
-        if (u instanceof Api.User) usersMap.set(u.id.toString(), u);
-      }
-      for (const c of result.chats) {
-        if (c instanceof Api.Chat) chatsMap.set(c.id.toString(), c);
-        else if (c instanceof Api.Channel) chatsMap.set(c.id.toString(), c);
-      }
+      const dialogsByKey = new Map<string, TgDialog>();
+      for (const result of results) {
+        if (!(result instanceof Api.messages.Dialogs) && !(result instanceof Api.messages.DialogsSlice)) continue;
 
-      const messagesMap = new Map<number, Api.Message>();
-      for (const m of result.messages) {
-        if (m instanceof Api.Message) messagesMap.set(m.id, m);
-      }
-
-      const dialogs: TgDialog[] = [];
-      for (const d of result.dialogs) {
-        if (!(d instanceof Api.Dialog)) continue;
-
-        const topMsg = messagesMap.get(d.topMessage);
-        let id = '';
-        let name = '';
-        let type: DialogType = 'user';
-        let accessHash = '0';
-
-        if (d.peer instanceof Api.PeerUser) {
-          id = d.peer.userId.toString();
-          const user = usersMap.get(id);
-          if (user) {
-            name = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || 'Unknown';
-            accessHash = (user.accessHash ?? bigInt(0)).toString();
-            type = user.bot ? 'bot' : 'user';
-          }
-        } else if (d.peer instanceof Api.PeerChat) {
-          id = d.peer.chatId.toString();
-          const chat = chatsMap.get(id);
-          if (chat && chat instanceof Api.Chat) {
-            name = chat.title || 'Group';
-            type = 'group';
-          }
-        } else if (d.peer instanceof Api.PeerChannel) {
-          id = d.peer.channelId.toString();
-          const channel = chatsMap.get(id);
-          if (channel && channel instanceof Api.Channel) {
-            name = channel.title || 'Channel';
-            accessHash = (channel.accessHash ?? bigInt(0)).toString();
-            type = channel.megagroup ? 'group' : 'channel';
-          }
+        const usersMap = new Map<string, Api.User>();
+        const chatsMap = new Map<string, Api.Chat | Api.Channel>();
+        for (const u of result.users) {
+          if (u instanceof Api.User) usersMap.set(u.id.toString(), u);
+        }
+        for (const c of result.chats) {
+          if (c instanceof Api.Chat) chatsMap.set(c.id.toString(), c);
+          else if (c instanceof Api.Channel) chatsMap.set(c.id.toString(), c);
         }
 
-        if (!id || !name) continue;
+        const messagesMap = new Map<number, Api.Message>();
+        for (const m of result.messages) {
+          if (m instanceof Api.Message) messagesMap.set(m.id, m);
+        }
 
-        dialogs.push({
-          id,
-          accessHash,
-          type,
-          name,
-          lastMessage: topMsg?.text || '',
-          lastMessageDate: topMsg ? new Date(topMsg.date * 1000) : new Date(0),
-          unreadCount: d.unreadCount ?? 0,
-        });
+        for (const d of result.dialogs) {
+          if (!(d instanceof Api.Dialog)) continue;
+
+          const topMsg = messagesMap.get(d.topMessage);
+          const archived = d.folderId === 1;
+          if (archived && !includeArchived) continue;
+
+          let id = '';
+          let name = '';
+          let type: DialogType = 'personal';
+          let accessHash = '0';
+          let apiType: TgDialog['apiType'] = 'PeerUser';
+          let isForum = false;
+          let isGigagroup = false;
+
+          if (d.peer instanceof Api.PeerUser) {
+            id = d.peer.userId.toString();
+            apiType = 'PeerUser';
+            const user = usersMap.get(id);
+            if (user) {
+              name = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || 'Unknown';
+              accessHash = (user.accessHash ?? bigInt(0)).toString();
+              type = user.bot ? 'bot' : 'personal';
+            }
+          } else if (d.peer instanceof Api.PeerChat) {
+            id = d.peer.chatId.toString();
+            apiType = 'PeerChat';
+            const chat = chatsMap.get(id);
+            if (chat && chat instanceof Api.Chat) {
+              name = chat.title || 'Group';
+              type = 'group';
+            }
+          } else if (d.peer instanceof Api.PeerChannel) {
+            id = d.peer.channelId.toString();
+            apiType = 'PeerChannel';
+            const channel = chatsMap.get(id);
+            if (channel && channel instanceof Api.Channel) {
+              name = channel.title || 'Channel';
+              accessHash = (channel.accessHash ?? bigInt(0)).toString();
+              type = channel.megagroup || channel.gigagroup ? 'group' : 'channel';
+              isForum = channel.forum ?? false;
+              isGigagroup = channel.gigagroup ?? false;
+            }
+          }
+
+          if (!id || !name) continue;
+
+          dialogsByKey.set(`${apiType}:${id}`, {
+            id,
+            accessHash,
+            type,
+            name,
+            lastMessage: topMsg?.text || '',
+            lastMessageDate: topMsg ? new Date(topMsg.date * 1000) : new Date(0),
+            unreadCount: d.unreadCount ?? 0,
+            archived,
+            apiType,
+            isForum,
+            isGigagroup,
+          });
+        }
       }
+
+      const dialogs = Array.from(dialogsByKey.values());
 
       dialogs.sort((a, b) => b.lastMessageDate.getTime() - a.lastMessageDate.getTime());
       this.ngZone.run(() => this.dialogs.set(dialogs));
@@ -436,12 +467,29 @@ export class TelegramService {
     }
   }
 
-  async searchDialogs(query: string): Promise<TgDialog[]> {
+  async setShowArchivedChats(showArchived: boolean): Promise<void> {
+    this.showArchivedChats.set(showArchived);
+    localStorage.setItem(STORAGE_KEYS.SHOW_ARCHIVED_CHATS, String(showArchived));
+    if (showArchived && this.client) {
+      await this.loadDialogs(true);
+    }
+    this.onArchiveVisibilityChanged?.(showArchived);
+  }
+
+  filterDialogs(dialogs: TgDialog[], filter: DialogFilter = 'all', includeArchived = this.showArchivedChats()): TgDialog[] {
+    return dialogs.filter(dialog =>
+      (includeArchived || !dialog.archived) &&
+      (filter === 'all' || dialog.type === filter)
+    );
+  }
+
+  async searchDialogs(query: string, filter: DialogFilter = 'all', includeArchived = this.showArchivedChats()): Promise<TgDialog[]> {
     const q = query.trim();
-    if (!q) return this.dialogs();
+    const visibleDialogs = this.filterDialogs(this.dialogs(), filter, includeArchived);
+    if (!q) return visibleDialogs;
 
     const lower = q.toLowerCase();
-    return this.dialogs().filter(d => d.name.toLowerCase().includes(lower));
+    return visibleDialogs.filter(d => d.name.toLowerCase().includes(lower));
   }
 
   private buildInputPeer(peerId: string, dialog?: TgDialog | null, contact?: TgContact | null): Api.TypeInputPeer {
@@ -584,17 +632,25 @@ export class TelegramService {
               lastMessage: '',
               lastMessageDate: new Date(0),
               unreadCount: 0,
+              archived: false,
+              apiType: 'PeerChat',
+              isForum: false,
+              isGigagroup: false,
             };
           }
           if (c instanceof Api.Channel) {
             return {
               id: c.id.toString(),
               accessHash: (c.accessHash ?? bigInt(0)).toString(),
-              type: (c.megagroup ? 'group' : 'channel') as DialogType,
+              type: (c.megagroup || c.gigagroup ? 'group' : 'channel') as DialogType,
               name: c.title || 'Channel',
               lastMessage: '',
               lastMessageDate: new Date(0),
               unreadCount: 0,
+              archived: false,
+              apiType: 'PeerChannel',
+              isForum: c.forum ?? false,
+              isGigagroup: c.gigagroup ?? false,
             };
           }
           return null;
@@ -617,11 +673,13 @@ export class TelegramService {
     localStorage.removeItem(STORAGE_KEYS.API_ID);
     localStorage.removeItem(STORAGE_KEYS.API_HASH);
     localStorage.removeItem(STORAGE_KEYS.CONTACTS);
+    localStorage.removeItem(STORAGE_KEYS.SHOW_ARCHIVED_CHATS);
     this.isAuthenticated.set(false);
     this.authStep.set('credentials');
     this.authError.set('');
     this.contacts.set([]);
     this.dialogs.set([]);
+    this.showArchivedChats.set(false);
     this.messages.set([]);
     this.currentPeerId.set('');
     this.currentPeerName.set('');

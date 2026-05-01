@@ -4,9 +4,10 @@ import {
   IonHeader, IonToolbar, IonTitle, IonButtons, IonButton, IonIcon,
   IonContent, IonSpinner, IonList, IonItem, IonAvatar, IonLabel,
   IonSearchbar, IonSegment, IonSegmentButton, IonBadge, IonNote,
+  IonPopover, IonToggle,
 } from '@ionic/angular/standalone';
 import { TelegramService, TgContact, TgDialog } from '../../services/telegram.service';
-import { OkDocService } from '../../services/okdoc.service';
+import { ActiveTab, OkDocService } from '../../services/okdoc.service';
 
 @Component({
   selector: 'app-contacts',
@@ -15,6 +16,7 @@ import { OkDocService } from '../../services/okdoc.service';
     IonHeader, IonToolbar, IonTitle, IonButtons, IonButton, IonIcon,
     IonContent, IonSpinner, IonList, IonItem, IonAvatar, IonLabel,
     IonSearchbar, IonSegment, IonSegmentButton, IonBadge, IonNote,
+    IonPopover, IonToggle,
   ],
   template: `
     <ion-header>
@@ -24,21 +26,44 @@ import { OkDocService } from '../../services/okdoc.service';
           <ion-button (click)="refresh()">
             <ion-icon slot="icon-only" name="refresh-outline"></ion-icon>
           </ion-button>
-          <ion-button (click)="logout()">
-            <ion-icon slot="icon-only" name="log-out-outline"></ion-icon>
+          <ion-button id="contacts-header-menu" aria-label="Open menu">
+            <ion-icon slot="icon-only" name="ellipsis-vertical-outline"></ion-icon>
           </ion-button>
         </ion-buttons>
+        <ion-popover trigger="contacts-header-menu" triggerAction="click" side="bottom" alignment="end">
+          <ng-template>
+            <ion-list lines="none">
+              <ion-item>
+                <ion-toggle
+                  labelPlacement="start"
+                  [checked]="tg.showArchivedChats()"
+                  (ionChange)="onArchiveToggle($event)"
+                >
+                  Show archived
+                </ion-toggle>
+              </ion-item>
+              <ion-item button detail="false" (click)="logout()">
+                <ion-icon slot="start" name="log-out-outline"></ion-icon>
+                <ion-label>Sign out</ion-label>
+              </ion-item>
+            </ion-list>
+          </ng-template>
+        </ion-popover>
       </ion-toolbar>
       <ion-toolbar>
         <ion-segment [value]="activeTab()" (ionChange)="onTabChange($event)">
-          <ion-segment-button value="chats">Chats</ion-segment-button>
+          <ion-segment-button value="all_chats">All Chats</ion-segment-button>
+          <ion-segment-button value="personal_chats">Personal</ion-segment-button>
+          <ion-segment-button value="group_chats">Groups</ion-segment-button>
+          <ion-segment-button value="channel_chats">Channels</ion-segment-button>
+          <ion-segment-button value="bot_chats">Bots</ion-segment-button>
           <ion-segment-button value="contacts">Contacts</ion-segment-button>
         </ion-segment>
       </ion-toolbar>
     </ion-header>
 
     <ion-content>
-      @if (activeTab() === 'chats') {
+      @if (activeTab() !== 'contacts') {
         <ion-searchbar
           placeholder="Search chats..."
           [debounce]="250"
@@ -78,6 +103,7 @@ import { OkDocService } from '../../services/okdoc.service';
               </ion-avatar>
               <ion-label>
                 <h2>{{ dialog.name }}</h2>
+                <p class="dialog-type">{{ dialogTypeLabel(dialog) }}</p>
                 @if (dialog.lastMessage) {
                   <p class="last-message">{{ dialog.lastMessage }}</p>
                 }
@@ -145,6 +171,14 @@ import { OkDocService } from '../../services/okdoc.service';
       padding: 48px 16px;
       color: var(--ion-color-medium);
     }
+    ion-segment {
+      overflow-x: auto;
+      justify-content: flex-start;
+    }
+    ion-segment-button {
+      min-width: 104px;
+      flex: 0 0 auto;
+    }
     .empty-state {
       display: flex;
       flex-direction: column;
@@ -189,6 +223,11 @@ import { OkDocService } from '../../services/okdoc.service';
       text-overflow: ellipsis;
       max-width: 200px;
     }
+    .dialog-type {
+      color: var(--ion-color-medium);
+      font-size: 0.78em;
+      margin-bottom: 2px;
+    }
     .chat-meta {
       display: flex;
       flex-direction: column;
@@ -211,7 +250,7 @@ export class ContactsPage implements OnInit, OnDestroy {
   private readonly okdoc = inject(OkDocService);
   private readonly router = inject(Router);
 
-  readonly activeTab = signal<'chats' | 'contacts'>('chats');
+  readonly activeTab = this.okdoc.activeTab;
 
   protected readonly searchResults = signal<TgContact[] | null>(null);
   protected readonly chatSearchResults = signal<TgDialog[] | null>(null);
@@ -222,12 +261,21 @@ export class ContactsPage implements OnInit, OnDestroy {
   });
 
   protected readonly filteredDialogs = computed(() => {
-    return this.chatSearchResults() ?? this.tg.dialogs();
+    const dialogs = this.chatSearchResults() ?? this.tg.dialogs();
+    return this.tg.filterDialogs(dialogs, this.activeDialogFilter(), this.tg.showArchivedChats());
   });
 
-  async ngOnInit(): Promise<void> {
-    this.okdoc.onSwitchTab = (tab) => this.activeTab.set(tab);
+  private activeDialogFilter() {
+    switch (this.activeTab()) {
+      case 'personal_chats': return 'personal';
+      case 'group_chats': return 'group';
+      case 'channel_chats': return 'channel';
+      case 'bot_chats': return 'bot';
+      default: return 'all';
+    }
+  }
 
+  async ngOnInit(): Promise<void> {
     this.tg.loading.set(true);
     await Promise.all([
       this.tg.loadDialogs(),
@@ -237,7 +285,7 @@ export class ContactsPage implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    this.okdoc.onSwitchTab = undefined;
+    if (this.searchTimeout) clearTimeout(this.searchTimeout);
   }
 
   protected openChat(peerId: string): void {
@@ -246,7 +294,7 @@ export class ContactsPage implements OnInit, OnDestroy {
 
   protected async refresh(): Promise<void> {
     this.tg.loading.set(true);
-    if (this.activeTab() === 'chats') {
+    if (this.activeTab() !== 'contacts') {
       await this.tg.loadDialogs();
     } else {
       await this.tg.loadContacts();
@@ -255,7 +303,7 @@ export class ContactsPage implements OnInit, OnDestroy {
   }
 
   protected onTabChange(event: CustomEvent): void {
-    this.activeTab.set(event.detail.value);
+    this.setActiveTab(event.detail.value as ActiveTab);
   }
 
   protected onSearch(event: CustomEvent): void {
@@ -283,9 +331,34 @@ export class ContactsPage implements OnInit, OnDestroy {
     }
 
     this.searchTimeout = setTimeout(async () => {
-      const results = await this.tg.searchDialogs(query);
+      const results = await this.tg.searchDialogs(query, this.activeDialogFilter(), this.tg.showArchivedChats());
       this.chatSearchResults.set(results);
     }, 300);
+  }
+
+  protected async onArchiveToggle(event: CustomEvent): Promise<void> {
+    await this.tg.setShowArchivedChats(event.detail.checked ?? false);
+    this.chatSearchResults.set(null);
+  }
+
+  protected dialogTypeLabel(dialog: TgDialog): string {
+    if (dialog.archived) return `${this.baseDialogTypeLabel(dialog)} · Archived`;
+    return this.baseDialogTypeLabel(dialog);
+  }
+
+  private baseDialogTypeLabel(dialog: TgDialog): string {
+    if (dialog.type === 'personal') return 'Personal chat';
+    if (dialog.type === 'bot') return 'Bot chat';
+    if (dialog.type === 'channel') return 'Channel';
+    if (dialog.isForum) return 'Forum group';
+    if (dialog.isGigagroup) return 'Gigagroup';
+    return dialog.apiType === 'PeerChat' ? 'Basic group' : 'Group chat';
+  }
+
+  private setActiveTab(tab: ActiveTab, notify = true): void {
+    this.okdoc.setActiveTab(tab, notify);
+    this.chatSearchResults.set(null);
+    this.searchResults.set(null);
   }
 
   protected formatDate(date: Date): string {
